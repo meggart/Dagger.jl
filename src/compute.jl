@@ -1,4 +1,4 @@
-export stage, cached_stage, compute, debug_compute, cleanup
+export stage, cached_stage, compute, debug_compute
 
 ###### Scheduler #######
 
@@ -55,16 +55,6 @@ end
 
 Base.@deprecate gather(ctx, x) collect(ctx, x)
 Base.@deprecate gather(x) collect(x)
-
-cleanup() = cleanup(Context(global_context()))
-function cleanup(ctx::Context)
-    if :scheduler in keys(PLUGINS)
-        scheduler = PLUGINS[:scheduler]
-        (scheduler).cleanup(ctx)
-        delete!(PLUGINS, :scheduler)
-    end
-    nothing
-end
 
 function get_type(s::String)
     local T
