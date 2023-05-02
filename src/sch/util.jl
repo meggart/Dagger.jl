@@ -1,5 +1,6 @@
 const DAGDEBUG_CATEGORIES = Symbol[:global, :submit, :schedule, :scope,
-                                   :take, :execute, :move, :processor]
+                                   :take, :execute, :move, :processor,
+                                   :metrics]
 macro dagdebug(thunk, category, msg, args...)
     cat_sym = category.value
     @gensym id
@@ -60,7 +61,7 @@ function get_propagated_options(thunk)
         end
         nt = merge(nt, (key=>value,))
     end
-    nt
+    return nt
 end
 
 "Fills the result for all registered futures of `node`."
@@ -358,16 +359,16 @@ end
 
 function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     T = typeof(p)
-    # FIXME: MaxUtilization
     est_time_util = round(UInt64, if time_util !== nothing && haskey(time_util, T)
         time_util[T] * 1000^3
     else
-        get(state.signature_time_cost, sig, 1000^3)
+        something(fetch_metric(SimpleAverageAggregator(ThreadTimeMetric()), :signature, :execute, sig), 1000^3)
     end)
+    # TODO: Factor in runtime allocations as well
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
         alloc_util[T]
     else
-        get(state.signature_alloc_cost, sig, UInt64(0))
+        something(fetch_metric(SimpleAverageAggregator(ResultSizeMetric()), :signature, :execute, sig), UInt64(0))
     end::UInt64
     est_occupancy = if occupancy !== nothing && haskey(occupancy, T)
         # Clamp to 0-1, and scale between 0 and `typemax(UInt32)`
@@ -386,27 +387,6 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     return true, est_time_util, est_alloc_util, est_occupancy
 end
 
-function populate_processor_cache_list!(state, procs)
-    # Populate the cache if empty
-    if state.procs_cache_list[] === nothing
-        current = nothing
-        for p in map(x->x.pid, procs)
-            for proc in get_processors(OSProc(p))
-                next = ProcessorCacheEntry(OSProc(p), proc)
-                if current === nothing
-                    current = next
-                    current.next = current
-                    state.procs_cache_list[] = current
-                else
-                    current.next = next
-                    current = next
-                    current.next = state.procs_cache_list[]
-                end
-            end
-        end
-    end
-end
-
 "Like `sum`, but replaces `nothing` entries with the average of non-`nothing` entries."
 function impute_sum(xs)
     length(xs) == 0 && return 0
@@ -423,7 +403,7 @@ function impute_sum(xs)
         end
     end
 
-    total + nothing_count * total / something_count
+    return total + nothing_count * total / something_count
 end
 
 "Collects all arguments for `task`, converting Thunk inputs to Chunks."
@@ -434,43 +414,6 @@ function collect_task_inputs(state, task)
         push!(inputs, pos => (istask(input) ? state.cache[input] : input))
     end
     return inputs
-end
-
-"""
-Estimates the cost of scheduling `task` on each processor in `procs`. Considers
-current estimated per-processor compute pressure, and transfer costs for each
-`Chunk` argument to `task`. Returns `(procs, costs)`, with `procs` sorted in
-order of ascending cost.
-"""
-function estimate_task_costs(state, procs, task, inputs)
-    tx_rate = state.transfer_rate[]
-
-    # Find all Chunks
-    chunks = Chunk[]
-    for input in inputs
-        if input isa Chunk
-            push!(chunks, input)
-        end
-    end
-
-    # Estimate network transfer costs based on data size
-    # N.B. `affinity(x)` really means "data size of `x`"
-    # N.B. We treat same-worker transfers as having zero transfer cost
-    # TODO: For non-Chunk, model cost from scheduler to worker
-    # TODO: Measure and model processor move overhead
-    transfer_costs = Dict(proc=>impute_sum([affinity(chunk)[2] for chunk in filter(c->get_parent(processor(c))!=get_parent(proc), chunks)]) for proc in procs)
-
-    # Estimate total cost to move data and get task running after currently-scheduled tasks
-    costs = Dict(proc=>state.worker_time_pressure[get_parent(proc).pid][proc]+(tx_cost/tx_rate) for (proc, tx_cost) in transfer_costs)
-
-    # Shuffle procs around, so equally-costly procs are equally considered
-    P = randperm(length(procs))
-    procs = getindex.(Ref(procs), P)
-
-    # Sort by lowest cost first
-    sort!(procs, by=p->costs[p])
-
-    return procs, costs
 end
 
 """

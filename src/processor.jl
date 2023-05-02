@@ -155,11 +155,13 @@ iscompatible(proc::ThreadProc, opts, f, args...) = true
 iscompatible_func(proc::ThreadProc, opts, f) = true
 iscompatible_arg(proc::ThreadProc, opts, x) = true
 function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @nospecialize(kwargs...))
-    tls = get_tls()
+    tls = Ref(get_tls())
     task = Task() do
-        set_tls!(tls)
-        TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
-        @invokelatest f(args...; kwargs...)
+        set_tls!(tls[])
+        TimespanLogging.prof_task_put!(tls[].sch_handle.thunk_id.id)
+        result = @invokelatest f(args...; kwargs...)
+        tls[] = get_tls()
+        return result
     end
     task.sticky = true
     ret = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, proc.tid-1)
@@ -168,7 +170,7 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @n
     end
     @assert Threads.threadid(task) == proc.tid
     schedule(task)
-    try
+    result = try
         fetch(task)
     catch err
         @static if VERSION < v"1.7-rc1"
@@ -179,6 +181,8 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @n
         err, frames = stk[1]
         rethrow(CapturedException(err, frames))
     end
+    set_tls!(tls[])
+    return result
 end
 get_parent(proc::ThreadProc) = OSProc(proc.owner)
 default_enabled(proc::ThreadProc) = true
@@ -326,12 +330,16 @@ in_thunk() = haskey(task_local_storage(), :_dagger_sch_uid)
 
 Gets all Dagger TLS variable as a `NamedTuple`.
 """
-get_tls() = (
-    sch_uid=task_local_storage(:_dagger_sch_uid),
-    sch_handle=task_local_storage(:_dagger_sch_handle),
-    processor=thunk_processor(),
-    task_spec=task_local_storage(:_dagger_task_spec),
-)
+function get_tls()
+    tls = task_local_storage()
+    return (;
+        sch_uid=tls[:_dagger_sch_uid],
+        sch_handle=tls[:_dagger_sch_handle],
+        processor=tls[:_dagger_processor],
+        task_spec=tls[:_dagger_task_spec],
+        metrics=get(Sch.LocalMetricsCache, tls, :_dagger_local_metrics_cache)
+    )
+end
 
 """
     set_tls!(tls)
@@ -343,4 +351,6 @@ function set_tls!(tls)
     task_local_storage(:_dagger_sch_handle, tls.sch_handle)
     task_local_storage(:_dagger_processor, tls.processor)
     task_local_storage(:_dagger_task_spec, tls.task_spec)
+    metrics = haskey(tls, :metrics) ? tls.metrics : Sch.LocalMetricsCache()
+    task_local_storage(:_dagger_local_metrics_cache, metrics)
 end
