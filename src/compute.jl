@@ -25,10 +25,7 @@ runs the scheduler with the specified options. Returns a Chunk which references
 the result.
 """
 function compute(ctx::Context, d::Thunk; options=nothing)
-    scheduler = get!(PLUGINS, :scheduler) do
-        get_type(PLUGIN_CONFIGS[:scheduler])
-    end
-    res = scheduler.compute_dag(ctx, d; options=options)
+    result = Sch.compute_dag(ctx, d; options=options)
     if ctx.log_file !== nothing
         if ctx.log_sink isa TimespanLogging.LocalEventLog
             logs = TimespanLogging.get_logs!(ctx.log_sink)
@@ -39,12 +36,12 @@ function compute(ctx::Context, d::Thunk; options=nothing)
             @warn "Context log_sink not set to LocalEventLog, skipping"
         end
     end
-    res
+    result
 end
 
 function debug_compute(ctx::Context, args...; profile=false, options=nothing)
-    @time res = compute(ctx, args...; options=options)
-    get_logs!(ctx.log_sink), res
+    @time result = compute(ctx, args...; options=options)
+    get_logs!(ctx.log_sink), result
 end
 
 function debug_compute(arg; profile=false, options=nothing)
